@@ -1,0 +1,5 @@
+api/bin
+api/gen
+api/vendor
+api/.env
+deployments/tmp

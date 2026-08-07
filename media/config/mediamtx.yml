@@ -1,0 +1,147 @@
+########################################
+# Logging
+########################################
+
+logLevel: info
+logDestinations: [stdout]
+logFile:
+
+########################################
+# API
+########################################
+
+api: yes
+apiAddress: 0.0.0.0:9997
+
+########################################
+# Metrics (optional)
+########################################
+
+metrics: yes
+metricsAddress: 0.0.0.0:9998
+
+########################################
+# pprof (optional)
+########################################
+
+pprof: yes
+pprofAddress: 0.0.0.0:9999
+
+########################################
+# RTSP
+########################################
+
+rtsp: yes
+rtspAddress: :8554
+
+########################################
+# RTMP
+########################################
+
+rtmp: yes
+rtmpAddress: :1935
+
+########################################
+# HLS
+########################################
+
+hls: yes
+hlsAddress: :8888
+hlsDirectory: /hls
+
+########################################
+# WebRTC
+########################################
+
+webrtc: yes
+webrtcAddress: :8889
+
+########################################
+# SRT
+########################################
+
+srt: yes
+srtAddress: :8890
+
+########################################
+# Playback
+########################################
+
+playback: yes
+playbackAddress: :9996
+
+########################################
+# Authentication
+########################################
+
+authMethod: http
+
+authHTTPAddress: http://api:5555/mediamtx/auth
+
+authHTTPExclude:
+  - action: api
+  - action: metrics
+  - action: pprof
+
+########################################
+# Path defaults
+########################################
+
+pathDefaults:
+
+  source: publisher
+
+  publishUser:
+  publishPass:
+
+  readUser:
+  readPass:
+
+  overridePublisher: yes
+
+  # Record live streams to disk.
+  # Source: https://mediamtx.org/docs/features/record
+  record: no
+  recordPath: /recordings/%path/%Y-%m-%d_%H-%M-%S-%f
+  recordFormat: fmp4
+  recordPartDuration: 1s
+  recordSegmentDuration: 1h
+  recordDeleteAfter: 1d
+
+  ######################################
+  # Webhooks + ABR transcoding
+  # Source: https://mediamtx.org/docs/features/remuxing-reencoding-compression
+  ######################################
+
+  runOnReady: /scripts/on_ready.sh
+  runOnReadyRestart: yes
+
+  runOnNotReady: /scripts/hook_api.sh not-ready
+
+  runOnRead: /scripts/hook_api.sh read
+  runOnReadRestart: no
+
+  runOnUnread: /scripts/hook_api.sh unread
+
+  runOnDemand:
+  runOnDemandRestart: no
+  runOnUnDemand:
+
+########################################
+# Paths
+########################################
+
+paths:
+
+  # Transcoded ladders: no nested ffmpeg, no extra recordings.
+  "~^(.+)_(360p|480p|720p|1080p)$":
+    source: publisher
+    record: no
+    runOnReady:
+    runOnReadyRestart: no
+    runOnNotReady:
+    runOnRead:
+    runOnUnread:
+
+  all:
+    source: publisher

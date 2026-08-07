@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Finnio playback</title>
+    <style>
+      :root {
+        color-scheme: light;
+        font-family: ui-sans-serif, system-ui, sans-serif;
+      }
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: grid;
+        place-items: center;
+        background: #0f1115;
+        color: #f4f6f8;
+      }
+      main {
+        width: min(960px, 92vw);
+      }
+      video {
+        width: 100%;
+        background: #000;
+        border-radius: 8px;
+      }
+      p {
+        margin: 0.75rem 0 0;
+        opacity: 0.75;
+        font-size: 0.95rem;
+      }
+      code {
+        font-size: 0.85em;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <video id="player" controls autoplay playsinline></video>
+      <p id="status">Loading recordings…</p>
+    </main>
+    <script>
+      const PLAYBACK = "http://localhost:9996";
+      const params = new URLSearchParams(location.search);
+      const path =
+        params.get("path") || "a3f2c891-4b5e-4d7a-9c12-8f4e6d2a1b90";
+
+      const statusEl = document.getElementById("status");
+      const player = document.getElementById("player");
+
+      function parseTs(value) {
+        return Date.parse(value);
+      }
+
+      async function playAll() {
+        const listRes = await fetch(
+          `${PLAYBACK}/list?path=${encodeURIComponent(path)}`
+        );
+        if (!listRes.ok) {
+          throw new Error(`list failed: ${listRes.status}`);
+        }
+
+        const segments = await listRes.json();
+        if (!segments.length) {
+          throw new Error("no segments found");
+        }
+
+        const start = segments[0].start;
+        const last = segments[segments.length - 1];
+        const duration =
+          (parseTs(last.start) - parseTs(start)) / 1000 + last.duration;
+
+        const url = new URL(`${PLAYBACK}/get`);
+        url.searchParams.set("path", path);
+        url.searchParams.set("start", start);
+        url.searchParams.set("duration", duration.toFixed(3));
+        url.searchParams.set("format", "mp4");
+
+        player.src = url.toString();
+        statusEl.textContent = `${segments.length} segments · ${duration.toFixed(
+          1
+        )}s · path ${path}`;
+      }
+
+      playAll().catch((err) => {
+        statusEl.textContent = err.message;
+      });
+    </script>
+  </body>
+</html>

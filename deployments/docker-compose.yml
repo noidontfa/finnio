@@ -1,0 +1,55 @@
+services:
+  api:
+    build:
+      context: ..
+      dockerfile: api/Dockerfile
+    restart: unless-stopped
+    environment:
+      API_addr: ":5555"
+      DATA_DIR: /app/data
+      INGRESS_URL: rtmp://localhost:1935
+      HLS_ABR_DIR: /hls/abr
+      PUBLIC_URL: http://localhost:5555
+    ports:
+      - "5555:5555"
+    volumes:
+      - api-data:/app/data
+      - ./tmp/hls:/hls
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--spider", "http://localhost:5555/healthz"]
+      interval: 5s
+      timeout: 2s
+      retries: 10
+
+  media:
+    build:
+      context: ..
+      dockerfile: media/Dockerfile
+    container_name: media
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+    environment:
+      # Set any of these to "1" to skip that ladder rung.
+      ABR_DISABLE_360P: "0"
+      ABR_DISABLE_480P: "0"
+      ABR_DISABLE_720P: "0"
+      ABR_DISABLE_1080P: "0"
+    ports:
+      - "8554:8554" # RTSP
+      - "1935:1935" # RTMP
+      - "8888:8888" # HLS
+      # - "8889:8889" # WebRTC
+      # - "8890:8890/udp" # SRT
+      - "9996:9996" # Playback
+      - "9997:9997" # API
+
+    volumes:
+      - ../media/config/mediamtx.yml:/mediamtx.yml:ro
+      - ../media/scripts:/scripts:ro
+      - ./tmp/hls:/hls
+      - ./tmp/recordings:/recordings
+
+volumes:
+  api-data:

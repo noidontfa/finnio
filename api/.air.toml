@@ -1,0 +1,12 @@
+root = "."
+tmp_dir = "bin"
+
+[build]
+cmd = "make build-dev"
+bin = "./bin/api"
+include_ext = ["go", "tpl", "tmpl", "html"]
+exclude_dir = ["bin", "vendor", "gen"]
+delay = 1000
+
+[log]
+time = true
