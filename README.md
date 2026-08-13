@@ -132,6 +132,75 @@ Useful env vars (API / platform):
 
 For Compose, MediaMTX also accepts `ABR_DISABLE_360P` / `480P` / `720P` / `1080P` (`"1"` to skip a ladder rung).
 
+## Development process
+
+Typical loop when working on Finnio:
+
+### One-time setup
+
+1. Clone the repo and ensure Go 1.26+, Docker, and PostgreSQL are available.
+2. Copy env sample and adjust if needed:
+
+   ```bash
+   cp api/.env.sample api/.env
+   ```
+
+3. Create the Postgres database (`dev_finnio`) and apply migrations (`go tool goose up` from `api/`).
+4. From `api/`, run `make setup` once if you prefer global tool binaries; otherwise `go tool …` is enough.
+
+### Day-to-day
+
+1. **Start dependencies**
+   - Full stack: `cd deployments && docker compose up --build`
+   - API-only: keep Postgres running; optionally run only the `media` service if you need ingest/ABR.
+
+2. **Run the API with hot reload**
+
+   ```bash
+   cd api
+   make dev
+   ```
+
+   Air watches `.go` files and rebuilds via `make build-dev` (which regenerates Swagger + sqlc, then builds).
+
+3. **Make the change in the right place**
+
+   | You are changing… | Edit | Then |
+   |-------------------|------|------|
+   | HTTP routes / handlers / services | `api/internal/httpapi/…` | Air rebuilds automatically |
+   | Request/response shapes or Swagger comments | handlers + `cmd/server/main.go` annotations | `make swagger` (or wait for Air rebuild) |
+   | SQL queries | `api/db/queries/*.sql` | `make sqlc-generate` (or Air rebuild) |
+   | Schema | add a goose migration under `api/db/migrations/` | `go tool goose up`, then update queries + regenerate sqlc |
+   | Media hooks / ABR ladder | `media/scripts/`, `media/config/mediamtx.yml` | restart the `media` container / Compose service |
+   | Shared env/platform helpers | `shared/platform/` | rebuild API |
+
+4. **Verify**
+   - Health: `curl http://localhost:5555/healthz`
+   - API docs: http://localhost:5555/swagger/index.html
+   - Unit tests: `cd api && make test`
+   - End-to-end: create a stream → publish RTMP → open `/hls/{key}/master.m3u8` (see [Example flow](#example-flow))
+
+5. **Before you push**
+   - Run migrations on a clean DB if you added SQL.
+   - Ensure generated artifacts are up to date (`make swagger sqlc-generate` / `make build`).
+   - `go test ./...` from `api/` (and `shared/` if you touched it).
+   - Keep secrets out of git (`api/.env` is gitignored; commit `.env.sample` only).
+
+### Useful Makefile targets (`api/`)
+
+| Target | What it does |
+|--------|----------------|
+| `make setup` | Install swag, goose, sqlc, air |
+| `make swagger` | Regenerate OpenAPI under `gen/swagger` |
+| `make sqlc-generate` | Regenerate typed DB code under `gen/db` |
+| `make build` | swagger + sqlc + compile to `bin/api` |
+| `make run` | build and run once |
+| `make dev` | Air hot reload |
+| `make test` | `go test ./...` |
+| `make clean` | remove `bin/` |
+
+Generated code (`api/gen/`, `api/bin/`) is gitignored — always regenerate locally (or via `make build` / Air) before running.
+
 ## Go workspace
 
 This repo is a multi-module workspace:

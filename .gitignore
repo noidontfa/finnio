@@ -3,3 +3,6 @@ api/gen
 api/vendor
 api/.env
 deployments/tmp
+
+*/bin
+*/.DS_Store
