@@ -2,6 +2,7 @@ api/bin
 api/gen
 api/vendor
 api/.env
+deployments/.env
 deployments/tmp
 
 */bin

@@ -4,6 +4,44 @@ Live streaming platform with a Go control-plane API and a MediaMTX + FFmpeg medi
 
 Create and manage streams over HTTP, publish via RTMP (or other MediaMTX protocols), and play back adaptive HLS (360p–1080p) from a master playlist.
 
+## What's new in v2
+
+v2 replaces the v1 **one-shot multi-rung FFmpeg ABR** (a single long-lived encode of the whole RTMP input) with a **segment-then-ABR** pipeline: source segments first, then per-segment encode workers over NATS JetStream.
+
+| | v1 | v2 |
+|---|---|---|
+| Live encode | One FFmpeg process builds the full ladder from RTMP | FFmpeg `-c copy` segments → NATS job per segment → ABR workers encode each rung |
+| Pipeline logic | Mostly `media/scripts/on_ready.sh` | Go packages + Cobra CLI (`media` binary) |
+| Scaling | Single encode process per stream | Horizontal ABR consumers (`abr-consumer`) |
+| Queue | None | NATS JetStream (`ABR` stream, `abr.requests`) |
+| On-disk layout | `/hls/abr/{key}/v{rung}/…` from one encode | Source: `/hls/abr/{key}/seg_*.ts`; ABR: `/tmp/abr/{key}/{rung}/…` |
+| Compose | `api` + `media` | `media` + `abr-consumer` + `nats` (API often on the host) |
+
+### Added
+
+- **`media` Go module** in the workspace (`go.work` → `api`, `media`, `shared`) with a Cobra CLI.
+- **Source segmenter** (`segment`, `segment-rtmp`): FFmpeg `-c copy` into `playlist.m3u8` + `seg_%05d.ts`.
+- **Segment watcher**: publishes each completed `.ts` (and a final `video_done`) to JetStream.
+- **ABR encode path**: per-segment ladder encode (360p / 480p / 720p / 1080p), atomic `.tmp` → rename, continuous timestamps (`-copyts`).
+- **Playlist assembly**: writes `master.m3u8` and per-rung `index.m3u8` (ENDLIST on `video_done`).
+- **NATS JetStream** service and `NATS_URL` platform config.
+- **`abr-consumer` Compose service**: runs `media abr-consumer` against shared `/hls` + `/tmp/abr` volumes.
+- **Live HLS serving hardening** on `GET /hls/{key}/*`: no stale `304` on playlists; `503` + `Retry-After` while ABR is not ready yet.
+
+### Changed
+
+- **`on_ready.sh`**: notifies the API, then runs `media segment-rtmp` (no inline multi-variant FFmpeg ABR).
+- **HLS output root for playback**: API `HLS_ABR_DIR` should point at the ABR output tree (Compose: `deployments/tmp/abr`), not the source-segment folder.
+- **Variant dirs**: `360p/`, `480p/`, … (no `v` prefix).
+- **Default ingress**: `rtmp://localhost:1935` (via shared platform config).
+- **Media image**: builds and ships `/usr/local/bin/media` alongside MediaMTX + FFmpeg.
+
+### Unchanged for viewers
+
+Playback URL stays `GET /hls/{key}/master.m3u8` (and variant playlists / `.ts` under that key).
+
+Design notes: [`docs/specs/segment-then-abr.md`](docs/specs/segment-then-abr.md).
+
 ## Architecture
 
 ```
@@ -13,19 +51,32 @@ Publisher (OBS / FFmpeg)
    ┌─────────┐  hooks / auth   ┌─────────┐
    │ MediaMTX │ ──────────────► │   API   │ ──► PostgreSQL
    └────┬────┘                 └────┬────┘
-        │ FFmpeg ABR ladder         │
+        │ on_ready                  │
         ▼                           ▼
-   /hls/abr/{key}/            Serve ABR HLS
-   master.m3u8                GET /hls/{key}/*
+┌────────────────────────────────┐  Serve ABR HLS
+│  media module (Go CLI)         │  GET /hls/{key}/*
+│                                │       ▲
+│  segment-rtmp (-c copy)        │       │
+│    → /hls/abr/{key}/seg_*.ts   │       │
+│           │                    │       │
+│           ▼                    │       │
+│  NATS JetStream (abr.requests) │       │
+│           │                    │       │
+│           ▼                    │       │
+│  abr-consumer(s)               │       │
+│    encode → /tmp/abr/{key}/ ───┼───────┘
+│    master.m3u8 + {rung}/…      │
+└────────────────────────────────┘
 ```
 
 | Path | Role |
 |------|------|
 | `api/` | Stream management HTTP API (Chi + fx) |
-| `media/` | MediaMTX config, ABR scripts, Docker image |
-| `shared/` | Shared platform config helpers |
-| `deployments/` | Docker Compose and runtime volumes |
-| `tmp/` | Local playback helper and sample assets |
+| `media/` | MediaMTX config, Go CLI (`segment`, `abr-consumer`, …), Docker image |
+| `shared/` | Shared platform config (`INGRESS_URL`, `NATS_URL`, …) |
+| `deployments/` | Docker Compose and runtime volumes (`tmp/hls`, `tmp/abr`) |
+| `docs/specs/` | Feature specs (e.g. segment-then-ABR) |
+| `tmp/` | Local playback helpers and sample assets |
 
 ## Tech stack
 
@@ -39,15 +90,17 @@ Publisher (OBS / FFmpeg)
 | Docs | [swag](https://github.com/swaggo/swag) → Swagger UI at `/swagger/index.html` |
 | Validation | [go-playground/validator](https://github.com/go-playground/validator) |
 | Media server | [MediaMTX](https://github.com/bluenviron/mediamtx) (RTMP, RTSP, HLS, WebRTC, SRT) |
-| Transcoding | FFmpeg (multi-bitrate HLS ladder) |
+| Media CLI | [Cobra](https://github.com/spf13/cobra) (`media` binary) |
+| Queue | [NATS](https://nats.io/) JetStream (ABR job queue) |
+| Transcoding | FFmpeg (source segment copy + per-segment ABR ladder) |
 | Hot reload | [Air](https://github.com/air-verse/air) |
 | Orchestration | Docker Compose |
 
 ## Prerequisites
 
 - **Go** 1.26+ (`go version`)
-- **Docker** and **Docker Compose** (for the full stack)
-- **PostgreSQL** 14+ (for local API development outside Compose)
+- **Docker** and **Docker Compose** (for media / NATS / ABR workers)
+- **PostgreSQL** 14+ (for local API development)
 - Optional: **FFmpeg** / OBS if you publish streams from the host
 
 ## Quick start (Docker Compose)
@@ -59,17 +112,38 @@ cd deployments
 docker compose up --build
 ```
 
-Services:
+Services (current Compose layout):
 
 | Service | Ports | Purpose |
 |---------|-------|---------|
-| `api` | `5555` | Control API, health, Swagger, ABR HLS proxy |
-| `media` | `1935` (RTMP), `8554` (RTSP), `8888` (HLS), `9996` (playback), `9997` (MediaMTX API) | Ingest + remux |
+| `media` | `1935` (RTMP), `8554` (RTSP), `8888` (HLS), `9996` (playback), `9997` (MediaMTX API) | Ingest; `on_ready` runs `segment-rtmp` |
+| `abr-consumer` | — | JetStream workers; encode segments → `/tmp/abr/{key}/` |
+| `nats` | `4222` (client), `8222` (monitoring) | JetStream (`-js`) |
 
-Health check: `GET http://localhost:5555/healthz`  
+The `api` service is typically commented out in Compose while you run the API on the host (`cd api && make run` / `make dev`) with:
+
+```bash
+HLS_ABR_DIR=../deployments/tmp/abr
+```
+
+Point MediaMTX at that host API via `deployments/.env` if needed:
+
+```env
+API_BASE_URL=http://host.docker.internal:5555
+MTX_AUTHHTTPADDRESS=http://host.docker.internal:5555/mediamtx/auth
+```
+
+Then recreate media: `docker compose up -d --force-recreate media`.
+
+Health check (API on host): `GET http://localhost:5555/healthz`  
 Swagger: http://localhost:5555/swagger/index.html
 
-HLS and recordings are written under `deployments/tmp/`.
+Volumes:
+
+| Host path | Role |
+|-----------|------|
+| `deployments/tmp/hls/` | Source segments (`/hls/abr/{key}/seg_*.ts` in containers) |
+| `deployments/tmp/abr/` | ABR output served by the API (`{key}/master.m3u8`, `{key}/360p/…`) |
 
 ## Local API development
 
@@ -112,25 +186,44 @@ go tool swag init -g cmd/server/main.go -o gen/swagger --parseDependency --parse
 
 ```bash
 cd api
-make run     # generate swagger + sqlc, build, run once
+make run     # generate swagger + sqlc, build, run with HLS_ABR_DIR=../deployments/tmp/abr
 # or hot reload:
 make dev     # air → make build-dev on change
 ```
 
 Default listen address: `:5555`.
 
-Useful env vars (API / platform):
+Useful env vars:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `API_addr` | `:5555` | HTTP listen address |
 | `DATABASE_URL` | `postgres://root:root@127.0.0.1:5432/dev_finnio` | Postgres DSN |
-| `INGRESS_URL` | `rtmp://localhost:5554` | Base RTMP URL returned for publish |
-| `PUBLIC_URL` | `http://localhost:5555` | Public base URL for HLS links |
-| `HLS_ABR_DIR` | `tmp/hls/abr` | On-disk ABR playlist root |
+| `INGRESS_URL` | `rtmp://localhost:1935` | Base RTMP URL returned for publish |
+| `PUBLIC_URL` / `EGRESS_URL` | `http://localhost:5555` | Public base URL for HLS links |
+| `HLS_ABR_DIR` | `tmp/hls/abr` (override to `../deployments/tmp/abr` for Compose ABR) | On-disk ABR playlist root |
+| `NATS_URL` | `nats://localhost:4222` | NATS / JetStream (media plane) |
 | `DATA_DIR` | `data` | API data directory |
 
-For Compose, MediaMTX also accepts `ABR_DISABLE_360P` / `480P` / `720P` / `1080P` (`"1"` to skip a ladder rung).
+Compose knobs for ABR workers: `ABR_CONSUMERS` (default `2`), `ABR_OUT_FOLDER` (default `/tmp/abr`).
+
+## Media CLI
+
+Build from `media/`:
+
+```bash
+cd media
+make build   # → bin/media
+```
+
+| Command | Purpose |
+|---------|---------|
+| `segment -i <file> -o <dir> -t 2 -s <id>` | File → source segments (`-c copy`) |
+| `segment-rtmp -i rtmp://… -o <dir> -t 2 -s <id>` | Live RTMP → source segments; publish ABR jobs to NATS |
+| `abr -c <n> -i <seg.ts> -o <dir>` | Dev helper: start consumers + publish one segment job |
+| `abr-consumer -c <n> -o <dir>` | Long-running JetStream workers (Compose entrypoint) |
+
+Useful Makefile targets (`media/`): `segment`, `segment-rtmp`, `segment-rtmp-test`, `abr`, `abr-consumer`, `play` (local HLS player via `tmp/play.py`).
 
 ## Development process
 
@@ -151,8 +244,8 @@ Typical loop when working on Finnio:
 ### Day-to-day
 
 1. **Start dependencies**
-   - Full stack: `cd deployments && docker compose up --build`
-   - API-only: keep Postgres running; optionally run only the `media` service if you need ingest/ABR.
+   - Media plane: `cd deployments && docker compose up --build` (`media`, `abr-consumer`, `nats`)
+   - API: `cd api && make run` or `make dev` with `HLS_ABR_DIR` pointing at `deployments/tmp/abr`
 
 2. **Run the API with hot reload**
 
@@ -171,19 +264,20 @@ Typical loop when working on Finnio:
    | Request/response shapes or Swagger comments | handlers + `cmd/server/main.go` annotations | `make swagger` (or wait for Air rebuild) |
    | SQL queries | `api/db/queries/*.sql` | `make sqlc-generate` (or Air rebuild) |
    | Schema | add a goose migration under `api/db/migrations/` | `go tool goose up`, then update queries + regenerate sqlc |
-   | Media hooks / ABR ladder | `media/scripts/`, `media/config/mediamtx.yml` | restart the `media` container / Compose service |
-   | Shared env/platform helpers | `shared/platform/` | rebuild API |
+   | Segment / ABR / NATS | `media/internal/…`, `media/internal/cmd/` | `cd media && make build` / restart `media` + `abr-consumer` |
+   | Media hooks | `media/scripts/`, `media/config/mediamtx.yml` | recreate the `media` Compose service |
+   | Shared env/platform helpers | `shared/platform/` | rebuild API and/or media |
 
 4. **Verify**
    - Health: `curl http://localhost:5555/healthz`
    - API docs: http://localhost:5555/swagger/index.html
-   - Unit tests: `cd api && make test`
+   - Unit tests: `cd api && make test`; `cd media && make test`
    - End-to-end: create a stream → publish RTMP → open `/hls/{key}/master.m3u8` (see [Example flow](#example-flow))
 
 5. **Before you push**
    - Run migrations on a clean DB if you added SQL.
    - Ensure generated artifacts are up to date (`make swagger sqlc-generate` / `make build`).
-   - `go test ./...` from `api/` (and `shared/` if you touched it).
+   - `go test ./...` from `api/`, `media/`, and `shared/` as touched.
    - Keep secrets out of git (`api/.env` is gitignored; commit `.env.sample` only).
 
 ### Useful Makefile targets (`api/`)
@@ -194,7 +288,7 @@ Typical loop when working on Finnio:
 | `make swagger` | Regenerate OpenAPI under `gen/swagger` |
 | `make sqlc-generate` | Regenerate typed DB code under `gen/db` |
 | `make build` | swagger + sqlc + compile to `bin/api` |
-| `make run` | build and run once |
+| `make run` | build and run once (`HLS_ABR_DIR=../deployments/tmp/abr`) |
 | `make dev` | Air hot reload |
 | `make test` | `go test ./...` |
 | `make clean` | remove `bin/` |
@@ -206,14 +300,16 @@ Generated code (`api/gen/`, `api/bin/`) is gitignored — always regenerate loca
 This repo is a multi-module workspace:
 
 ```
-go.work → ./api, ./shared
+go.work → ./api, ./media, ./shared
 ```
 
-With `go.work` present, local `shared` is used without publishing. Common commands from the repo root:
+With `go.work` present, local `shared` / `media` are used without publishing. Common commands from the repo root:
 
 ```bash
 go build ./api/...
+go build ./media/...
 go test ./api/...
+go test ./media/...
 go test ./shared/...
 ```
 
@@ -247,7 +343,13 @@ Declared in `api/go.mod`:
 - `github.com/swaggo/http-swagger` / `github.com/swaggo/swag` — OpenAPI UI + codegen
 - `go.uber.org/fx` — dependency injection / lifecycle
 
-`shared` has no third-party `require`s; it only exposes platform env loading.
+`media` (selected):
+
+- `github.com/spf13/cobra` — CLI
+- `github.com/nats-io/nats.go` — JetStream client
+- `github.com/fsnotify/fsnotify` — segment folder watcher
+
+`shared` exposes platform env loading (`INGRESS_URL`, `EGRESS_URL`, `DATABASE_URL`, `NATS_URL`).
 
 ### Dev tools (`go tool` / Makefile)
 
@@ -259,17 +361,20 @@ Declared in `api/go.mod`:
 ### Media / infra
 
 - MediaMTX `1.x` (`bluenviron/mediamtx`)
-- FFmpeg (ABR encoding in the media container)
+- FFmpeg (segment copy + ABR encode in the media image)
+- NATS 2.x with JetStream
 - PostgreSQL
 - Docker / Alpine-based images under `api/Dockerfile` and `media/Dockerfile`
 
 ## Example flow
 
-1. Create a stream: `POST /streams` with `{"name":"demo"}`.
-2. Read `ingress_url` (or `GET /streams/{key}/ingress`).
-3. Publish with OBS/FFmpeg to that RTMP URL (MediaMTX path = stream key).
-4. On publish, MediaMTX runs `media/scripts/on_ready.sh` → notifies the API and builds `/hls/abr/{key}/master.m3u8`.
-5. Play via `GET /hls/{key}/master.m3u8` or open `tmp/playback.html` against your public URL.
+1. Start Compose (`media`, `abr-consumer`, `nats`) and the API with `HLS_ABR_DIR=../deployments/tmp/abr`.
+2. Create a stream: `POST /streams` with `{"name":"demo"}`.
+3. Read `ingress_url` (or `GET /streams/{key}/ingress`).
+4. Publish with OBS/FFmpeg to that RTMP URL (MediaMTX path = stream key).
+5. On publish, MediaMTX runs `on_ready.sh` → API ready hook → `media segment-rtmp` writes `/hls/abr/{key}/seg_*.ts` and publishes ABR jobs.
+6. `abr-consumer` encodes into `deployments/tmp/abr/{key}/{360p,480p,720p,1080p}/` and writes `master.m3u8`.
+7. Play via `GET /hls/{key}/master.m3u8` or open `tmp/playback.html` / `make play` against the ABR folder.
 
 ## License
 

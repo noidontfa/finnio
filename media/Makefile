@@ -2,7 +2,7 @@
 BINARY_NAME=media
 BUILD_DIR=bin
 
-.PHONY: all build run clean test hello segment segment-rtmp segment-rtmp-test
+.PHONY: all build run clean test hello segment segment-rtmp segment-rtmp-test abr abr-consumer play
 
 all: build
 
@@ -38,11 +38,11 @@ hello: build
 	
 segment: build
 	@echo "Running segment command..."
-	@./$(BUILD_DIR)/$(BINARY_NAME) segment -i ../tmp/sample/file_example_MP4_1920_18MG.mp4 -o ../deployments/tmp/segment/9e325fda-f425-47f8-afa1-6e80a8992e4d -t 2
+	@./$(BUILD_DIR)/$(BINARY_NAME) segment -i ../tmp/sample/file_example_MP4_1920_18MG.mp4 -o ../deployments/tmp/segment/9e325fda-f425-47f8-afa1-6e80a8992e4d -t 2 -s 9e325fda-f425-47f8-afa1-6e80a8992e4d
 
 segment-rtmp: build
 	@echo "Running segment-rtmp command..."
-	@./$(BUILD_DIR)/$(BINARY_NAME) segment-rtmp -i rtmp://127.0.0.1:1935/$(KEY) -o ../deployments/tmp/segment-rtmp/$(KEY) -t 2
+	@./$(BUILD_DIR)/$(BINARY_NAME) segment-rtmp -i rtmp://127.0.0.1:1935/$(KEY) -o ../deployments/tmp/segment-rtmp/$(KEY) -t 2 -s $(KEY)
 
 # Local RTMP smoke test: MP4 → FFmpeg publish → MediaMTX → segment-rtmp
 # Requires: docker, ffmpeg. Uses a throwaway MediaMTX on :1936 (no auth / on_ready).
@@ -54,6 +54,7 @@ SEGMENT_RTMP_PORT ?= 1936
 SEGMENT_RTMP_PATH ?= segment-test
 SEGMENT_RTMP_URL := rtmp://127.0.0.1:$(SEGMENT_RTMP_PORT)/$(SEGMENT_RTMP_PATH)
 SEGMENT_RTMP_OUT ?= ../deployments/tmp/segment-rtmp/$(SEGMENT_RTMP_PATH)
+SEGMENT_RTMP_SOURCE_ID ?= $(SEGMENT_RTMP_PATH)
 MEDIAMTX_TEST_CTR ?= mediamtx-segment-test
 DURATION ?= 10
 
@@ -76,6 +77,7 @@ segment-rtmp-test: build
 		./$(BUILD_DIR)/$(BINARY_NAME) segment-rtmp \
 			-i "$(SEGMENT_RTMP_URL)" \
 			-o "$(SEGMENT_RTMP_OUT)" \
+			-s "$(SEGMENT_RTMP_SOURCE_ID)" \
 			-t 2 \
 			--wait 15; \
 		status=$$?; \
@@ -88,3 +90,28 @@ segment-rtmp-test: build
 		echo "Output:"; \
 		ls -la "$(SEGMENT_RTMP_OUT)"; \
 		exit $$status
+
+CONSUMERS ?= 2
+ARB_IN ?= ../deployments/tmp/segment-rtmp/segment-test/seg_00003.ts
+ARB_OUT ?= ../deployments/tmp/abr-test
+
+abr: build
+	@echo "Running arb command..."
+	@./$(BUILD_DIR)/$(BINARY_NAME) abr -c $(CONSUMERS) -i $(ARB_IN) -o $(ARB_OUT)
+	
+abr-consumer: build
+	@echo "Running abr-consumer command..."
+	@./$(BUILD_DIR)/$(BINARY_NAME) abr-consumer -c $(CONSUMERS) -o $(ARB_OUT)
+
+# Local HLS player for an ABR folder that already has master.m3u8
+# (browsers block HLS from file:// — this serves player + playlists over http).
+#
+#   make play
+#   make play PLAY_FOLDER=../deployments/tmp/hls/abr/<key> PLAY_PORT=8081
+PLAY_FOLDER ?= ../deployments/tmp/abr-test/segment-test
+PLAY_PORT ?= 8080
+
+play:
+	@test -f "$(PLAY_FOLDER)/master.m3u8" || (echo "missing master.m3u8 in $(PLAY_FOLDER)"; exit 1)
+	@echo "Playing $(PLAY_FOLDER) at http://127.0.0.1:$(PLAY_PORT)/"
+	@python3 ../tmp/play.py "$(PLAY_FOLDER)" -p $(PLAY_PORT)

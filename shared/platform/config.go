@@ -9,13 +9,15 @@ type Platform struct {
 	IngressURL  string
 	EgressURL   string
 	DatabaseURL string
+	NatsURL     string
 }
 
 func Load() Platform {
 	return Platform{
-		IngressURL:  getenv("INGRESS_URL", "rtmp://localhost:5554"),
-		EgressURL:   getenv("EGRESS_URL", "http://localhosst:5553"),
+		IngressURL:  getenv("INGRESS_URL", "rtmp://localhost:1935"),
+		EgressURL:   getenv("EGRESS_URL", "http://localhost:5555"),
 		DatabaseURL: getenv("DATABASE_URL", "postgres://root:root@127.0.0.1:5432/dev_finnio"),
+		NatsURL:     getenv("NATS_URL", "nats://localhost:4222"),
 	}
 }
 

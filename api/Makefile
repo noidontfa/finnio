@@ -13,7 +13,7 @@ build: swagger sqlc-generate
 
 run: build 
 	@echo "Running the application..."
-	./$(BUILD_DIR)/$(BINARY_NAME)
+	HLS_ABR_DIR=../deployments/tmp/abr ./$(BUILD_DIR)/$(BINARY_NAME)
 	
 build-dev: build 
 	@echo "Building the Go binary..."

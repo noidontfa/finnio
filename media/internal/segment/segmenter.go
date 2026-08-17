@@ -23,6 +23,7 @@ type SourceOptions struct {
 type Hooks struct {
 	OnSegmentCreated func(segmentFile string) error
 	OnSegmenterReady func(outputFolder string) error
+	OnSegmenterDone  func(outputFolder string) error
 }
 
 type Segmenter struct {
@@ -48,7 +49,8 @@ func (s *Segmenter) Source(inputFile string, outputFolder string, hlsTime int) e
 //
 // Flow:
 //  1. Tell hooks the output folder is ready
-//  2. Watch for new .ts files (calls OnSegmentCreated)
+//  2. Watch for completed .ts files (calls OnSegmentCreated when the next
+//     segment starts, and for the last file when ffmpeg exits)
 //  3. Run ffmpeg
 //  4. When ffmpeg finishes, stop the watcher and CatchUp any missed files
 func (s *Segmenter) SourceContext(ctx context.Context, options SourceOptions, hooks Hooks) error {
@@ -88,17 +90,39 @@ func (s *Segmenter) SourceContext(ctx context.Context, options SourceOptions, ho
 	for {
 		select {
 		case err := <-cmdErr:
-			if err != nil {
-				return err
-			}
 			watcher.Stop()
+			<-watchDone
+			var cuErr error
+			if hooks.OnSegmentCreated != nil {
+				cuErr = watcher.CatchUp(options.OutputFolder, hooks.OnSegmentCreated)
+			}
+			if cuErr != nil {
+				return cuErr
+			}
+			if hooks.OnSegmenterDone != nil {
+				hookErr := hooks.OnSegmenterDone(options.OutputFolder)
+				if hookErr != nil {
+					return hookErr
+				}
+			}
+			return err
 		case err := <-watchDone:
+			if hooks.OnSegmenterDone != nil {
+				hookErr := hooks.OnSegmenterDone(options.OutputFolder)
+				if hookErr != nil {
+					return hookErr
+				}
+			}
 			return err
 		}
 	}
 
 }
 
+// Timestamps are deliberately not reset per segment: the ABR stage encodes each
+// segment separately, and players need one continuous timeline across the whole
+// media playlist. Resetting makes every segment restart near zero, which stalls
+// playback after the first segment.
 func segmentArgs(options SourceOptions) []string {
 	args := []string{
 		"-i", options.InputFile,
@@ -111,10 +135,7 @@ func segmentArgs(options SourceOptions) []string {
 	if options.Live {
 		args = append(args, "-segment_list_flags", "+live")
 	}
-	args = append(args,
-		"-reset_timestamps", "1",
-		filepath.Join(options.OutputFolder, "seg_%05d.ts"),
-	)
+	args = append(args, filepath.Join(options.OutputFolder, "seg_%05d.ts"))
 	return args
 }
 

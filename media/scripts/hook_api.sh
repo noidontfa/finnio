@@ -5,6 +5,7 @@
 set -eu
 
 EVENT="${1:?event required}"
+API_BASE_URL="${API_BASE_URL:-http://api:5555}"
 
 case "$MTX_PATH" in
   *_360p|*_480p|*_720p|*_1080p)
@@ -21,7 +22,7 @@ case "$EVENT" in
       --data-urlencode "path=$MTX_PATH" \
       --data-urlencode "source_type=${MTX_SOURCE_TYPE:-}" \
       --data-urlencode "source_id=${MTX_SOURCE_ID:-}" \
-      http://api:5555/mediamtx/hooks/not-ready
+      "$API_BASE_URL/mediamtx/hooks/not-ready"
     ;;
   read)
     curl --fail --silent --show-error \
@@ -29,7 +30,7 @@ case "$EVENT" in
       --data-urlencode "path=$MTX_PATH" \
       --data-urlencode "reader_type=${MTX_READER_TYPE:-}" \
       --data-urlencode "reader_id=${MTX_READER_ID:-}" \
-      http://api:5555/mediamtx/hooks/read
+      "$API_BASE_URL/mediamtx/hooks/read"
     ;;
   unread)
     curl --fail --silent --show-error \
@@ -37,7 +38,7 @@ case "$EVENT" in
       --data-urlencode "path=$MTX_PATH" \
       --data-urlencode "reader_type=${MTX_READER_TYPE:-}" \
       --data-urlencode "reader_id=${MTX_READER_ID:-}" \
-      http://api:5555/mediamtx/hooks/unread
+      "$API_BASE_URL/mediamtx/hooks/unread"
     ;;
   *)
     echo "unknown hook event: $EVENT" >&2

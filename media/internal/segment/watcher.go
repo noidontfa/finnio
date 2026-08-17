@@ -3,23 +3,26 @@ package segment
 import (
 	"context"
 	"errors"
-	"fmt"
 	"log"
-	"os"
 	"path/filepath"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/fsnotify/fsnotify"
 )
 
 // Watcher watches a folder for new .ts segment files.
 // handled ensures each path is processed at most once (Watch + CatchUp share it).
+//
+// ffmpeg's segment muxer creates the next file when it closes the current one,
+// so a path is only published after the following segment appears (or on Stop
+// for the last open file).
 type Watcher struct {
 	fs      *fsnotify.Watcher
 	mu      sync.Mutex
 	handled map[string]bool
+	order   []string
+	current string
 
 	inFlight sync.WaitGroup
 	stop     chan struct{}
@@ -41,7 +44,6 @@ func NewWatcher() *Watcher {
 // Stop asks Watch to shut down gracefully: it stops accepting new events but
 // lets segments already being processed finish. Safe to call more than once.
 func (w *Watcher) Stop() {
-	fmt.Println("here stop")
 	w.stopOnce.Do(func() { close(w.stop) })
 }
 
@@ -51,8 +53,9 @@ type watchResult struct {
 	err  error
 }
 
-// Watch calls onReady once per new .ts file. It blocks until ctx is cancelled
-// or Stop is called; Stop drains segments that are still being processed.
+// Watch calls onReady once per completed .ts file. It blocks until ctx is
+// cancelled or Stop is called; Stop publishes the last open segment, then
+// drains in-flight callbacks.
 func (w *Watcher) Watch(ctx context.Context, folder string, onReady func(path string) error) error {
 	if err := w.fs.Add(folder); err != nil {
 		return err
@@ -67,12 +70,10 @@ func (w *Watcher) Watch(ctx context.Context, folder string, onReady func(path st
 	for {
 		select {
 		case <-ctxCancel.Done():
-			fmt.Println("here ctx cancel done")
 			w.drain(results, onReady)
 			return ctx.Err()
 
 		case <-w.stop:
-			fmt.Println("here stop drain Watch")
 			w.drain(results, onReady)
 			return nil
 
@@ -80,7 +81,7 @@ func (w *Watcher) Watch(ctx context.Context, folder string, onReady func(path st
 			if !ok {
 				return errors.New("watcher closed")
 			}
-			w.handleEvent(ctxCancel, event, results)
+			w.handleEvent(event, results)
 
 		case result := <-results:
 			if result.err != nil {
@@ -107,7 +108,7 @@ func (w *Watcher) Watch(ctx context.Context, folder string, onReady func(path st
 	}
 }
 
-func (w *Watcher) handleEvent(ctx context.Context, event fsnotify.Event, results chan<- watchResult) {
+func (w *Watcher) handleEvent(event fsnotify.Event, results chan<- watchResult) {
 	path := event.Name
 	// ffmpeg writes the playlist via *.tmp then renames; only final .ts segments matter.
 	if strings.HasSuffix(path, ".tmp") || !strings.HasSuffix(path, ".ts") {
@@ -118,23 +119,39 @@ func (w *Watcher) handleEvent(ctx context.Context, event fsnotify.Event, results
 		return
 	}
 
-	w.inFlight.Add(1)
-	go func(path string) {
-		defer w.inFlight.Done()
+	completed := w.rotate(path)
+	if completed == "" {
+		return
+	}
+	w.emit(completed, results)
+}
 
-		err := waitUntilWritten(ctx, path)
-		// Keep the claim on success so later events (and CatchUp) skip this
-		// path; release it on failure so it can be retried.
-		if err != nil {
-			w.unclaim(path)
-		}
-		results <- watchResult{path: path, err: err}
-	}(path)
+func (w *Watcher) rotate(path string) string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	prev := w.current
+	w.current = path
+	return prev
+}
+
+func (w *Watcher) takeCurrent() string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	path := w.current
+	w.current = ""
+	return path
+}
+
+func (w *Watcher) emit(path string, results chan<- watchResult) {
+	w.inFlight.Add(1)
+	go func() {
+		defer w.inFlight.Done()
+		results <- watchResult{path: path}
+	}()
 }
 
 // drain keeps receiving results until every in-flight segment goroutine has
-// finished. Workers send on an unbuffered channel, so once they are all done
-// there is nothing left to receive.
+// finished, then publishes the last open segment (ffmpeg has closed it).
 func (w *Watcher) drain(results <-chan watchResult, onReady func(path string) error) {
 	done := make(chan struct{})
 	go func() {
@@ -152,6 +169,10 @@ func (w *Watcher) drain(results <-chan watchResult, onReady func(path string) er
 			}
 			report(result)
 		case <-done:
+			last := w.takeCurrent()
+			if last != "" && onReady != nil {
+				_ = onReady(last)
+			}
 			return
 		}
 	}
@@ -162,7 +183,6 @@ func report(result watchResult) {
 		log.Printf("failed processing %s: %v", result.path, result.err)
 		return
 	}
-	// log.Println("segment ready:", result.path)
 }
 
 // CatchUp calls onReady for .ts files on disk that Watch never saw
@@ -186,63 +206,23 @@ func (w *Watcher) CatchUp(folder string, onReady func(path string) error) error 
 	return nil
 }
 
-const handledCap = 2
+const handledCap = 64
 
 // claim marks path as handled. Returns false if it was already claimed.
-// When the map reaches handledCap entries, it is cleared so long-lived
-// RTMP sessions do not retain every segment path forever.
+// When the map reaches handledCap entries, the oldest path is evicted so
+// long-lived RTMP sessions do not retain every segment path forever.
 func (w *Watcher) claim(path string) bool {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if w.handled[path] {
 		return false
 	}
-	if len(w.handled) >= handledCap {
-		w.handled = make(map[string]bool, handledCap)
+	if len(w.order) >= handledCap {
+		old := w.order[0]
+		w.order = w.order[1:]
+		delete(w.handled, old)
 	}
 	w.handled[path] = true
+	w.order = append(w.order, path)
 	return true
-}
-
-func (w *Watcher) unclaim(path string) {
-	w.mu.Lock()
-	delete(w.handled, path)
-	w.mu.Unlock()
-}
-
-func waitUntilWritten(ctx context.Context, file string) error {
-	const timeout = 500 * time.Millisecond
-	const poll = 50 * time.Millisecond
-
-	deadline := time.Now().Add(timeout)
-	var lastSize int64 = -1
-
-	for {
-		if time.Now().After(deadline) {
-			return fmt.Errorf("timeout waiting for file %s to finish writing", file)
-		}
-
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-		}
-
-		info, err := os.Stat(file)
-		if err != nil {
-			return err
-		}
-		if info.Size() == lastSize {
-			return nil
-		}
-		lastSize = info.Size()
-
-		timer := time.NewTimer(poll)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return ctx.Err()
-		case <-timer.C:
-		}
-	}
 }

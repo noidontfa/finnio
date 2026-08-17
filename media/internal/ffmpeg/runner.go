@@ -22,9 +22,9 @@ func (r *Runner) Run(args ...string) error {
 		return fmt.Errorf("ffmpeg failed: %w\n%s", err, output)
 	}
 
-	fmt.Println("--------------------------------")
-	fmt.Println(string(output))
-	fmt.Println("--------------------------------")
+	// fmt.Println("--------------------------------")
+	// fmt.Println(string(output))
+	// fmt.Println("--------------------------------")
 
 	return nil
 }

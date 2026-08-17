@@ -15,7 +15,7 @@ FROM alpine:3.22
 RUN addgroup -S finnio && adduser -S finnio -G finnio
 WORKDIR /app
 COPY --from=build /out/api /usr/local/bin/api
-COPY --chown=finnio:finnio api/data ./data
+# COPY --chown=finnio:finnio api/data ./data
 
 USER finnio
 EXPOSE 5555

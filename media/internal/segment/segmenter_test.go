@@ -35,3 +35,19 @@ func TestSegmentArgsLiveAddsListFlags(t *testing.T) {
 		t.Fatalf("file mode should not set segment_list_flags: %v", file)
 	}
 }
+
+func TestSegmentArgsKeepsContinuousTimestamps(t *testing.T) {
+	t.Parallel()
+
+	for _, live := range []bool{true, false} {
+		args := segmentArgs(SourceOptions{
+			InputFile:    "in.mp4",
+			OutputFolder: "/tmp/out",
+			HlsTime:      "2",
+			Live:         live,
+		})
+		if strings.Contains(strings.Join(args, " "), "-reset_timestamps") {
+			t.Fatalf("live=%v: resetting timestamps restarts every segment near zero: %v", live, args)
+		}
+	}
+}

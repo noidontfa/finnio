@@ -4,13 +4,17 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"media/internal/abr"
 	"media/internal/ffmpeg"
 	"media/internal/segment"
 	"os"
 	"os/signal"
+	"shared/platform"
 	"strconv"
 	"syscall"
+	"time"
 
+	"github.com/nats-io/nats.go"
 	"github.com/spf13/cobra"
 )
 
@@ -18,6 +22,7 @@ var (
 	inputFile    string
 	outputFolder string
 	hlsTime      int
+	sourceID     string
 )
 
 var segmentCms = &cobra.Command{
@@ -32,6 +37,7 @@ func init() {
 	segmentCms.Flags().StringVarP(&inputFile, "input", "i", "", "input file example: input.mp4")
 	segmentCms.Flags().StringVarP(&outputFolder, "output", "o", "", "output folder example: output")
 	segmentCms.Flags().IntVarP(&hlsTime, "hls-time", "t", 2, "segment time in seconds")
+	segmentCms.Flags().StringVarP(&sourceID, "source-id", "s", "", "source ID example: source_id")
 }
 
 func segmentCmd() {
@@ -49,13 +55,26 @@ func segmentCmd() {
 	fmt.Println("hlsTime:", hlsTime)
 	fmt.Println("--------------------------------")
 
+	cfg := platform.Load()
 	runner := ffmpeg.NewRunner()
 	segmenter := segment.NewSegmenter(runner)
+	nc, err := nats.Connect(cfg.NatsURL)
+	if err != nil {
+		log.Fatalf("Failed to connect to NATS: %v", err)
+	}
+	js, err := nc.JetStream()
+	if err != nil {
+		log.Fatalf("Failed to create JetStream context: %v", err)
+	}
+	pub := abr.NewPublisher(js)
+	if err != nil {
+		log.Fatalf("Failed to create ABR: %v", err)
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	err := segmenter.SourceContext(ctx,
+	err = segmenter.SourceContext(ctx,
 		segment.SourceOptions{
 			InputFile:    inputFile,
 			OutputFolder: outputFolder,
@@ -65,6 +84,15 @@ func segmentCmd() {
 			OnSegmentCreated: func(segmentFile string) error {
 				fmt.Println("segment created", segmentFile)
 				// Send segment file to Nats
+				err := pub.Publish(abr.Request{
+					SourceID:    sourceID,
+					SourceType:  "video",
+					SegmentFile: segmentFile,
+					Timestamp:   time.Now(),
+				})
+				if err != nil {
+					return err
+				}
 				return nil
 			},
 			OnSegmenterReady: func(outputFolder string) error {

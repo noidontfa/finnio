@@ -3,6 +3,7 @@ package handler
 import (
 	"context"
 	"errors"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -309,6 +310,18 @@ func (h *Handler) GetIngressURL(w http.ResponseWriter, r *http.Request) error {
 }
 
 // ServeABRHLS serves FFmpeg-generated ABR HLS (master.m3u8 + variant playlists/segments).
+// @Summary      Serve ABR HLS
+// @Description  Serves FFmpeg-generated ABR HLS (master.m3u8 + variant playlists/segments)
+// @Tags         streams
+// @Produce      video/mp2t
+// @Produce      application/vnd.apple.mpegurl
+// @Param        key  path  string  true  "Stream key (UUID)"
+// @Success      200  {file}  video/mp2t
+// @Success      200  {file}  application/vnd.apple.mpegurl
+// @Failure      400  {object}  entity.ErrorResponse
+// @Failure      404  {object}  entity.ErrorResponse
+// @Failure      500  {object}  entity.ErrorResponse
+// @Router       /hls/{key} [get]
 func (h *Handler) ServeABRHLS(w http.ResponseWriter, r *http.Request) error {
 	key := r.PathValue("key")
 	if key == "" || strings.Contains(key, "..") || strings.Contains(key, "/") {
@@ -328,6 +341,7 @@ func (h *Handler) ServeABRHLS(w http.ResponseWriter, r *http.Request) error {
 
 	root := filepath.Clean(h.cfg.HLSAbrDir)
 	full := filepath.Join(root, key, rel)
+	log.Println(full)
 	if !strings.HasPrefix(full, filepath.Join(root, key)+string(filepath.Separator)) &&
 		full != filepath.Join(root, key) {
 		return middleware.BadRequest("invalid playlist path")
