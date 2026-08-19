@@ -2,7 +2,7 @@
 BINARY_NAME=media
 BUILD_DIR=bin
 
-.PHONY: all build run clean test hello segment segment-rtmp segment-rtmp-test abr abr-consumer play
+.PHONY: all build run clean test hello segment segment-rtmp segment-rtmp-test abr abr-consumer play segment2 segment2-rtmp segment2-rtmp-test
 
 all: build
 
@@ -115,3 +115,62 @@ play:
 	@test -f "$(PLAY_FOLDER)/master.m3u8" || (echo "missing master.m3u8 in $(PLAY_FOLDER)"; exit 1)
 	@echo "Playing $(PLAY_FOLDER) at http://127.0.0.1:$(PLAY_PORT)/"
 	@python3 ../tmp/play.py "$(PLAY_FOLDER)" -p $(PLAY_PORT)
+
+segment2: build
+	@echo "Running segment command..."
+	@./$(BUILD_DIR)/$(BINARY_NAME) segment2 -i ../tmp/sample/file_example_MP4_1920_18MG.mp4 -o ../deployments/tmp/segment2/9e325fda-f425-47f8-afa1-6e80a8992e4d -t 2 -s 9e325fda-f425-47f8-afa1-6e80a8992e4d
+
+segment2-rtmp: build
+	@echo "Running segment2-rtmp command..."
+	@./$(BUILD_DIR)/$(BINARY_NAME) segment2-rtmp -i rtmp://127.0.0.1:1935/$(KEY) -o ../deployments/tmp/segment2-rtmp/$(KEY) -t 2 -s $(KEY)
+
+# Local RTMP smoke test for segment2: MP4 → FFmpeg publish → MediaMTX → segment2-rtmp
+# Requires: docker, ffmpeg. Uses a throwaway MediaMTX on :1937 (no auth / on_ready).
+#
+#   make segment2-rtmp-test
+#   make segment2-rtmp-test DURATION=20 SAMPLE_MP4=/path/to/file.mp4
+SEGMENT2_RTMP_PORT ?= 1937
+SEGMENT2_RTMP_PATH ?= segment2-test
+# FFmpeg RTMP is rtmp://host/app/playpath — a single path component does not publish.
+SEGMENT2_RTMP_URL := rtmp://127.0.0.1:$(SEGMENT2_RTMP_PORT)/live/$(SEGMENT2_RTMP_PATH)
+SEGMENT2_RTMP_OUT ?= ../deployments/tmp/segment2-rtmp/$(SEGMENT2_RTMP_PATH)
+SEGMENT2_RTMP_SOURCE_ID ?= $(SEGMENT2_RTMP_PATH)
+MEDIAMTX_SEGMENT2_TEST_CTR ?= mediamtx-segment2-test
+
+segment2-rtmp-test: build
+	@command -v docker >/dev/null || (echo "docker is required"; exit 1)
+	@command -v ffmpeg >/dev/null || (echo "ffmpeg is required"; exit 1)
+	@test -f "$(SAMPLE_MP4)" || (echo "missing sample: $(SAMPLE_MP4)"; exit 1)
+	@mkdir -p "$(SEGMENT2_RTMP_OUT)"
+	@rm -rf "$(SEGMENT2_RTMP_OUT)"/*
+	@docker rm -f $(MEDIAMTX_SEGMENT2_TEST_CTR) >/dev/null 2>&1 || true
+	@echo "Starting MediaMTX on :$(SEGMENT2_RTMP_PORT)..."
+	@docker run -d --name $(MEDIAMTX_SEGMENT2_TEST_CTR) -p $(SEGMENT2_RTMP_PORT):1935 bluenviron/mediamtx:latest >/dev/null
+	@sleep 1
+	@echo "Publishing $(DURATION)s of $(SAMPLE_MP4) → $(SEGMENT2_RTMP_URL)"
+	@set +e; \
+		ffmpeg -hide_banner -loglevel error -re -t $(DURATION) -i "$(SAMPLE_MP4)" \
+			-c copy -f flv "$(SEGMENT2_RTMP_URL)" \
+			> "$(SEGMENT2_RTMP_OUT)/.publish.log" 2>&1 & \
+		echo $$! > "$(SEGMENT2_RTMP_OUT)/.publish.pid"; \
+		echo "Running segment2-rtmp..."; \
+		./$(BUILD_DIR)/$(BINARY_NAME) segment2-rtmp \
+			-i "$(SEGMENT2_RTMP_URL)" \
+			-o "$(SEGMENT2_RTMP_OUT)" \
+			-s "$(SEGMENT2_RTMP_SOURCE_ID)" \
+			-t 2 \
+			--wait 15; \
+		status=$$?; \
+		if [ -f "$(SEGMENT2_RTMP_OUT)/.publish.pid" ]; then \
+			kill $$(cat "$(SEGMENT2_RTMP_OUT)/.publish.pid") 2>/dev/null || true; \
+			rm -f "$(SEGMENT2_RTMP_OUT)/.publish.pid"; \
+		fi; \
+		docker rm -f $(MEDIAMTX_SEGMENT2_TEST_CTR) >/dev/null 2>&1 || true; \
+		echo "--------------------------------"; \
+		echo "Output:"; \
+		ls -la "$(SEGMENT2_RTMP_OUT)"; \
+		if [ -s "$(SEGMENT2_RTMP_OUT)/.publish.log" ]; then \
+			echo "Publisher log:"; \
+			cat "$(SEGMENT2_RTMP_OUT)/.publish.log"; \
+		fi; \
+		exit $$status

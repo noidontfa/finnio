@@ -43,14 +43,14 @@ func (r *Runner) RunContext(ctx context.Context, args ...string) error {
 	return nil
 }
 
-func (r *Runner) RunFFProbe(ctx context.Context, args ...string) error {
-	cmd := exec.CommandContext(ctx, r.ffprobePath, args...)
+func (r *Runner) RunFFProbe(args ...string) ([]byte, error) {
+	cmd := exec.Command(r.ffprobePath, args...)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("ffprobe failed: %w\n%s", err, output)
+		return nil, fmt.Errorf("ffprobe failed: %w\n%s", err, output)
 	}
 
-	return nil
+	return output, nil
 }
 
 func (r *Runner) RunFFProbeContext(ctx context.Context, args ...string) ([]byte, error) {

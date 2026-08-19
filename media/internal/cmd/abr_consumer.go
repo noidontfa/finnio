@@ -39,10 +39,7 @@ func AbrConsumer() {
 	if err != nil {
 		log.Fatalf("Failed to create ABR consumer: %v", err)
 	}
-	hdl := abr.NewHandler(ffmpeg.NewRunner())
-	if err != nil {
-		log.Fatalf("Failed to create ABR handler: %v", err)
-	}
+	hdl := abr.NewHandlerV2(ffmpeg.NewRunner())
 	err = consumer.Run(
 		abr.ConsumerOptions{
 			NumConsumers: abrConsumerWorkers,

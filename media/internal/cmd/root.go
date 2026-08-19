@@ -22,4 +22,6 @@ func init() {
 	rootCmd.AddCommand(segmentRtmpCmd)
 	rootCmd.AddCommand(abrCmd)
 	rootCmd.AddCommand(abrConsumerCmd)
+	rootCmd.AddCommand(segment2Cms)
+	rootCmd.AddCommand(segmentRtmp2Cmd)
 }

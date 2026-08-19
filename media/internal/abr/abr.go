@@ -46,6 +46,9 @@ var (
 		{Label: "720p", Width: 1280, Height: 720, MaxRate: 3000000, Bitrate: 2000000, Enabled: true},
 		{Label: "1080p", Width: 1920, Height: 1080, MaxRate: 5000000, Bitrate: 2000000, Enabled: true},
 	}
+
+	TS_FILE    = "ts_file"
+	INDEX_FILE = "index_file"
 )
 
 func usableAudio(probeOut []byte) bool {
